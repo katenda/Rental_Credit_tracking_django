@@ -128,6 +128,10 @@ class RentalReport(models.Model):
         DEFAULT = "default", "Default"
         LEASE_VIOLATION = "lease_violation", "Lease violation"
 
+    class Status(models.TextChoices):
+        ACTIVE = "active", "Active"
+        VOID = "void", "Void / retracted"
+
     agreement = models.ForeignKey(
         RentalAgreement,
         on_delete=models.CASCADE,
@@ -147,12 +151,18 @@ class RentalReport(models.Model):
         blank=True,
     )
     reported_at = models.DateTimeField(auto_now_add=True)
+    status = models.CharField(
+        max_length=20,
+        choices=Status.choices,
+        default=Status.ACTIVE,
+        db_index=True,
+    )
 
     class Meta:
         ordering = ["-reported_at"]
 
     def __str__(self):
-        return f"Report {self.pk} ({self.report_type})"
+        return f"Report {self.pk} ({self.report_type}, {self.status})"
 
 
 class Dispute(models.Model):
@@ -188,6 +198,11 @@ class Dispute(models.Model):
         default=Status.OPEN,
     )
     resolution_notes = models.TextField(blank=True)
+    landlord_response = models.TextField(
+        blank=True,
+        default="",
+        help_text="Optional statement from the landlord on this agreement (visible to tenant and admin).",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -196,6 +211,37 @@ class Dispute(models.Model):
 
     def __str__(self):
         return f"Dispute {self.pk} ({self.status})"
+
+
+class DisputeAuditEntry(models.Model):
+    """Immutable record of an administrator change to dispute status and/or resolution notes."""
+
+    dispute = models.ForeignKey(
+        Dispute,
+        on_delete=models.CASCADE,
+        related_name="audit_entries",
+    )
+    previous_status = models.CharField(max_length=20)
+    new_status = models.CharField(max_length=20)
+    previous_resolution_notes = models.TextField(blank=True, default="")
+    new_resolution_notes = models.TextField(blank=True, default="")
+    changed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="dispute_audit_entries",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["created_at"]
+        indexes = [
+            models.Index(fields=["dispute", "created_at"]),
+        ]
+
+    def __str__(self):
+        return f"DisputeAudit({self.dispute_id} {self.previous_status!r}→{self.new_status!r})"
 
 
 class CreditScore(models.Model):

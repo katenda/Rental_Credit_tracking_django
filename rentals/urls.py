@@ -2,6 +2,7 @@ from django.urls import include, path
 from rest_framework.routers import DefaultRouter
 
 from .views import (
+    AdminRecalculateTenantCreditView,
     ConsentRecordViewSet,
     CreditScoreViewSet,
     DashboardStatsView,
@@ -25,6 +26,11 @@ router.register(r"invitations", TenantInvitationViewSet, basename="invitation")
 
 urlpatterns = [
     path("dashboard/stats/", DashboardStatsView.as_view(), name="dashboard-stats"),
+    path(
+        "admin/recalculate-tenant-credit/",
+        AdminRecalculateTenantCreditView.as_view(),
+        name="admin-recalculate-tenant-credit",
+    ),
     path("invitations/validate/", InvitationValidateView.as_view(), name="invitation-validate"),
     path("", include(router.urls)),
     path("profiles/landlord/me/", LandlordProfileMeView.as_view(), name="landlord-profile-me"),

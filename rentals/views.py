@@ -3,6 +3,7 @@ from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db.models import Exists, OuterRef, Q
 from django.utils import timezone
 from rest_framework import generics, status, viewsets
+from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
@@ -12,17 +13,21 @@ from .models import (
     ConsentRecord,
     CreditScore,
     Dispute,
+    DisputeAuditEntry,
     RentalAgreement,
     RentalReport,
     TenantInvitation,
     TenantProfile,
 )
-from .permissions import IsLandlord, IsTenant
+from .permissions import IsAdminRole, IsLandlord, IsTenant
 from .serializers import (
+    AdminRecalculateTenantCreditSerializer,
     ConsentRecordSerializer,
     CreditScoreSerializer,
     DisputeAdminUpdateSerializer,
+    DisputeAuditEntrySerializer,
     DisputeCreateSerializer,
+    DisputeLandlordUpdateSerializer,
     DisputeSerializer,
     LandlordProfileSerializer,
     RentalAgreementSerializer,
@@ -74,16 +79,17 @@ class RentalAgreementViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         user = self.request.user
+        base = RentalAgreement.objects.select_related(
+            "landlord",
+            "tenant",
+            "tenant__tenant_profile",
+        ).select_related("tenant__tenant_profile__credit_score")
         if user.role == User.Role.ADMIN:
-            return RentalAgreement.objects.select_related("landlord", "tenant").all()
+            return base.all()
         if user.role == User.Role.LANDLORD:
-            return RentalAgreement.objects.select_related("landlord", "tenant").filter(
-                landlord=user
-            )
+            return base.filter(landlord=user)
         if user.role == User.Role.TENANT:
-            return RentalAgreement.objects.select_related("landlord", "tenant").filter(
-                tenant=user
-            )
+            return base.filter(tenant=user)
         return RentalAgreement.objects.none()
 
     def perform_create(self, serializer):
@@ -131,20 +137,21 @@ class ConsentRecordViewSet(viewsets.mixins.CreateModelMixin, viewsets.mixins.Lis
 class RentalReportViewSet(viewsets.ModelViewSet):
     serializer_class = RentalReportSerializer
     permission_classes = [IsAuthenticated]
-    http_method_names = ["get", "post", "head", "options"]
+    http_method_names = ["get", "post", "delete", "head", "options"]
 
     def get_queryset(self):
         user = self.request.user
+        base = RentalReport.objects.select_related(
+            "agreement",
+            "agreement__tenant",
+            "submitted_by",
+        )
         if user.role == User.Role.ADMIN:
-            return RentalReport.objects.select_related("agreement", "submitted_by")
+            return base
         if user.role == User.Role.LANDLORD:
-            return RentalReport.objects.select_related("agreement", "submitted_by").filter(
-                agreement__landlord=user
-            )
+            return base.filter(agreement__landlord=user)
         if user.role == User.Role.TENANT:
-            return RentalReport.objects.select_related("agreement", "submitted_by").filter(
-                agreement__tenant=user
-            )
+            return base.filter(agreement__tenant=user)
         return RentalReport.objects.none()
 
     def get_serializer_context(self):
@@ -162,6 +169,26 @@ class RentalReportViewSet(viewsets.ModelViewSet):
         from .scoring import recalculate_tenant_credit_score
 
         recalculate_tenant_credit_score(instance.agreement.tenant_id)
+
+    def destroy(self, request, *args, **kwargs):
+        """Soft-delete: mark report void (keeps row for disputes/audit); recalculates tenant score."""
+        instance = self.get_object()
+        user = request.user
+        if user.role == User.Role.TENANT:
+            raise PermissionDenied("Tenants cannot retract rental reports.")
+        if user.role == User.Role.LANDLORD and instance.agreement.landlord_id != user.id:
+            raise PermissionDenied("You can only retract reports on your own agreements.")
+        if user.role not in (User.Role.LANDLORD, User.Role.ADMIN):
+            raise PermissionDenied("You cannot retract rental reports.")
+        tenant_id = instance.agreement.tenant_id
+        if instance.status != RentalReport.Status.VOID:
+            instance.status = RentalReport.Status.VOID
+            instance.save(update_fields=["status"])
+        from .scoring import recalculate_tenant_credit_score
+
+        recalculate_tenant_credit_score(tenant_id)
+        serializer = self.get_serializer(instance)
+        return Response(serializer.data, status=status.HTTP_200_OK)
 
 
 class CreditScoreViewSet(viewsets.ReadOnlyModelViewSet):
@@ -190,7 +217,11 @@ class DisputeViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         user = self.request.user
         qs = Dispute.objects.select_related(
-            "filed_by", "agreement", "rental_report"
+            "filed_by",
+            "agreement",
+            "agreement__tenant",
+            "agreement__landlord",
+            "rental_report",
         ).order_by("-created_at")
         if user.role == User.Role.ADMIN:
             return qs
@@ -201,7 +232,7 @@ class DisputeViewSet(viewsets.ModelViewSet):
         return Dispute.objects.none()
 
     def get_serializer_class(self):
-        if self.action in ("partial_update", "update"):
+        if self.action in ("partial_update", "update") and self.request.user.role == User.Role.ADMIN:
             return DisputeAdminUpdateSerializer
         if self.action == "create":
             return DisputeCreateSerializer
@@ -212,13 +243,84 @@ class DisputeViewSet(viewsets.ModelViewSet):
             raise PermissionDenied("Only tenants can file disputes.")
         serializer.save()
 
+    def perform_update(self, serializer):
+        inst = serializer.instance
+        old_status = inst.status
+        old_notes = inst.resolution_notes or ""
+        super().perform_update(serializer)
+        inst.refresh_from_db()
+        new_status = inst.status
+        new_notes = inst.resolution_notes or ""
+        if self.request.user.role == User.Role.ADMIN:
+            if old_status != new_status or old_notes != new_notes:
+                DisputeAuditEntry.objects.create(
+                    dispute=inst,
+                    previous_status=old_status,
+                    new_status=new_status,
+                    previous_resolution_notes=old_notes,
+                    new_resolution_notes=new_notes,
+                    changed_by=self.request.user,
+                )
+            from .scoring import recalculate_tenant_credit_score
+
+            recalculate_tenant_credit_score(inst.agreement.tenant_id)
+
+    @action(detail=True, methods=["get"], url_path="audit-log")
+    def audit_log(self, request, pk=None):
+        """Chronological admin changes to status and resolution notes (visible to tenant, landlord, admin)."""
+        dispute = self.get_object()
+        qs = DisputeAuditEntry.objects.filter(dispute=dispute).select_related("changed_by").order_by(
+            "created_at"
+        )
+        return Response(DisputeAuditEntrySerializer(qs, many=True).data)
+
     def partial_update(self, request, *args, **kwargs):
+        if request.user.role == User.Role.LANDLORD:
+            instance = self.get_object()
+            if instance.agreement.landlord_id != request.user.id:
+                raise PermissionDenied("You can only respond to disputes on your agreements.")
+            extra = set(request.data.keys()) - {"landlord_response"}
+            if extra:
+                raise PermissionDenied("Landlords may only update the landlord_response field.")
+            ser = DisputeLandlordUpdateSerializer(instance, data=request.data, partial=True)
+            ser.is_valid(raise_exception=True)
+            ser.save()
+            instance.refresh_from_db()
+            return Response(
+                DisputeSerializer(instance, context=self.get_serializer_context()).data
+            )
         if request.user.role != User.Role.ADMIN:
-            raise PermissionDenied("Only administrators can update disputes.")
+            raise PermissionDenied("Only administrators can update dispute status and resolution notes.")
+        # DRF's UpdateModelMixin.partial_update() calls self.update(). Do not override update() to call
+        # partial_update() — that causes infinite recursion for admin PATCH.
         return super().partial_update(request, *args, **kwargs)
 
-    def update(self, request, *args, **kwargs):
-        return self.partial_update(request, *args, **kwargs)
+
+class AdminRecalculateTenantCreditView(APIView):
+    """Recompute a tenant's rental credit score from current reports (admin support tool)."""
+
+    permission_classes = [IsAuthenticated, IsAdminRole]
+
+    def post(self, request):
+        ser = AdminRecalculateTenantCreditSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        tenant_id = ser.validated_data["tenant"]
+        from .scoring import recalculate_tenant_credit_score
+
+        recalculate_tenant_credit_score(tenant_id)
+        cs = (
+            CreditScore.objects.select_related("tenant_profile__user")
+            .filter(tenant_profile__user_id=tenant_id)
+            .first()
+        )
+        payload = {
+            "tenant": tenant_id,
+            "score": cs.score if cs else None,
+            "factors": cs.factors if cs else None,
+        }
+        if cs and getattr(cs, "updated_at", None):
+            payload["updated_at"] = cs.updated_at.isoformat()
+        return Response(payload)
 
 
 class DashboardStatsView(APIView):
@@ -251,6 +353,11 @@ class DashboardStatsView(APIView):
                             Dispute.Status.OPEN,
                             Dispute.Status.UNDER_REVIEW,
                         ],
+                    ).count(),
+                    "pending_invitations": TenantInvitation.objects.filter(
+                        landlord=user,
+                        redeemed_at__isnull=True,
+                        expires_at__gt=timezone.now(),
                     ).count(),
                 }
             )

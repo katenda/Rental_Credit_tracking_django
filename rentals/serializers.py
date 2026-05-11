@@ -7,6 +7,7 @@ from .models import (
     ConsentRecord,
     CreditScore,
     Dispute,
+    DisputeAuditEntry,
     LandlordProfile,
     RentalAgreement,
     RentalReport,
@@ -126,6 +127,7 @@ class RentalAgreementSerializer(serializers.ModelSerializer):
     landlord_name = serializers.CharField(source="landlord.username", read_only=True)
     tenant_name = serializers.CharField(source="tenant.username", read_only=True)
     has_consent = serializers.SerializerMethodField()
+    tenant_credit_score = serializers.SerializerMethodField(read_only=True)
 
     class Meta:
         model = RentalAgreement
@@ -141,6 +143,7 @@ class RentalAgreementSerializer(serializers.ModelSerializer):
             "monthly_rent",
             "status",
             "has_consent",
+            "tenant_credit_score",
             "created_at",
             "updated_at",
         )
@@ -150,12 +153,20 @@ class RentalAgreementSerializer(serializers.ModelSerializer):
             "landlord_name",
             "tenant_name",
             "has_consent",
+            "tenant_credit_score",
             "created_at",
             "updated_at",
         )
 
     def get_has_consent(self, obj):
         return hasattr(obj, "consent")
+
+    def get_tenant_credit_score(self, obj):
+        profile = getattr(obj.tenant, "tenant_profile", None)
+        if profile is None:
+            return None
+        cs = getattr(profile, "credit_score", None)
+        return cs.score if cs else None
 
     def validate_tenant(self, value):
         if value.role != User.Role.TENANT:
@@ -178,6 +189,8 @@ class ConsentRecordSerializer(serializers.ModelSerializer):
 
     signature = serializers.CharField(write_only=True)
     has_signature = serializers.SerializerMethodField(read_only=True)
+    signed_by_username = serializers.CharField(source="signed_by.username", read_only=True)
+    signature_image = serializers.CharField(read_only=True)
 
     class Meta:
         model = ConsentRecord
@@ -185,12 +198,21 @@ class ConsentRecordSerializer(serializers.ModelSerializer):
             "id",
             "agreement",
             "signed_by",
+            "signed_by_username",
             "consent_version",
             "signed_at",
             "signature",
+            "signature_image",
             "has_signature",
         )
-        read_only_fields = ("id", "signed_by", "signed_at", "has_signature")
+        read_only_fields = (
+            "id",
+            "signed_by",
+            "signed_by_username",
+            "signed_at",
+            "signature_image",
+            "has_signature",
+        )
 
     def get_has_signature(self, obj):
         return bool(obj.signature_image and str(obj.signature_image).strip())
@@ -223,18 +245,40 @@ class ConsentRecordSerializer(serializers.ModelSerializer):
 
 
 class RentalReportSerializer(serializers.ModelSerializer):
+    report_type_display = serializers.CharField(source="get_report_type_display", read_only=True)
+    status_display = serializers.CharField(source="get_status_display", read_only=True)
+    property_address = serializers.CharField(source="agreement.property_address", read_only=True)
+    tenant_name = serializers.CharField(source="agreement.tenant.username", read_only=True)
+    submitted_by_username = serializers.CharField(source="submitted_by.username", read_only=True)
+
     class Meta:
         model = RentalReport
         fields = (
             "id",
             "agreement",
+            "property_address",
+            "tenant_name",
             "submitted_by",
+            "submitted_by_username",
             "report_type",
+            "report_type_display",
+            "status",
+            "status_display",
             "description",
             "amount_outstanding",
             "reported_at",
         )
-        read_only_fields = ("id", "submitted_by", "reported_at")
+        read_only_fields = (
+            "id",
+            "submitted_by",
+            "submitted_by_username",
+            "property_address",
+            "tenant_name",
+            "report_type_display",
+            "status",
+            "status_display",
+            "reported_at",
+        )
 
     def validate_agreement(self, agreement):
         if not hasattr(agreement, "consent"):
@@ -255,18 +299,45 @@ class CreditScoreSerializer(serializers.ModelSerializer):
         source="tenant_profile.user.username",
         read_only=True,
     )
+    tenant_user_id = serializers.IntegerField(
+        source="tenant_profile.user_id",
+        read_only=True,
+    )
 
     class Meta:
         model = CreditScore
-        fields = ("id", "tenant_profile", "tenant_username", "score", "factors", "updated_at")
+        fields = (
+            "id",
+            "tenant_profile",
+            "tenant_user_id",
+            "tenant_username",
+            "score",
+            "factors",
+            "updated_at",
+        )
         read_only_fields = fields
 
 
 class DisputeSerializer(serializers.ModelSerializer):
     filed_by_username = serializers.CharField(source="filed_by.username", read_only=True)
     property_address = serializers.CharField(source="agreement.property_address", read_only=True)
+    agreement_landlord_id = serializers.IntegerField(source="agreement.landlord_id", read_only=True)
+    agreement_landlord_name = serializers.CharField(
+        source="agreement.landlord.username",
+        read_only=True,
+    )
+    agreement_tenant_id = serializers.IntegerField(source="agreement.tenant_id", read_only=True)
+    agreement_tenant_username = serializers.CharField(
+        source="agreement.tenant.username",
+        read_only=True,
+    )
     rental_report_type = serializers.CharField(
         source="rental_report.report_type",
+        read_only=True,
+        allow_null=True,
+    )
+    rental_report_status = serializers.CharField(
+        source="rental_report.status",
         read_only=True,
         allow_null=True,
     )
@@ -276,18 +347,32 @@ class DisputeSerializer(serializers.ModelSerializer):
         fields = (
             "id",
             "agreement",
+            "agreement_landlord_id",
+            "agreement_landlord_name",
+            "agreement_tenant_id",
+            "agreement_tenant_username",
             "property_address",
             "rental_report",
             "rental_report_type",
+            "rental_report_status",
             "filed_by",
             "filed_by_username",
             "reason",
             "status",
             "resolution_notes",
+            "landlord_response",
             "created_at",
             "updated_at",
         )
         read_only_fields = fields
+
+
+class DisputeLandlordUpdateSerializer(serializers.ModelSerializer):
+    """Landlords may append/update their side of the story (not status or admin notes)."""
+
+    class Meta:
+        model = Dispute
+        fields = ("landlord_response",)
 
 
 class DisputeCreateSerializer(serializers.ModelSerializer):
@@ -319,3 +404,43 @@ class DisputeAdminUpdateSerializer(serializers.ModelSerializer):
     class Meta:
         model = Dispute
         fields = ("status", "resolution_notes")
+
+
+class DisputeAuditEntrySerializer(serializers.ModelSerializer):
+    changed_by_username = serializers.CharField(
+        source="changed_by.username",
+        read_only=True,
+        allow_null=True,
+    )
+
+    class Meta:
+        model = DisputeAuditEntry
+        fields = (
+            "id",
+            "dispute",
+            "previous_status",
+            "new_status",
+            "previous_resolution_notes",
+            "new_resolution_notes",
+            "changed_by",
+            "changed_by_username",
+            "created_at",
+        )
+        read_only_fields = fields
+
+
+class AdminRecalculateTenantCreditSerializer(serializers.Serializer):
+    """Admin-only: recompute rental credit from all reports for a tenant user."""
+
+    tenant = serializers.IntegerField(min_value=1)
+
+    def validate_tenant(self, value):
+        try:
+            user = User.objects.get(pk=value)
+        except User.DoesNotExist as exc:
+            raise serializers.ValidationError("No user with this id.") from exc
+        if user.role != User.Role.TENANT:
+            raise serializers.ValidationError(
+                "Only tenant user ids are accepted (the leaseholder whose score is recomputed)."
+            )
+        return value

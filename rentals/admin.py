@@ -4,6 +4,7 @@ from .models import (
     ConsentRecord,
     CreditScore,
     Dispute,
+    DisputeAuditEntry,
     LandlordProfile,
     RentalAgreement,
     RentalReport,
@@ -47,17 +48,60 @@ class ConsentRecordAdmin(admin.ModelAdmin):
         return bool(obj.signature_image and str(obj.signature_image).strip())
 
 
+class DisputeAuditEntryInline(admin.TabularInline):
+    model = DisputeAuditEntry
+    extra = 0
+    can_delete = False
+    readonly_fields = (
+        "created_at",
+        "previous_status",
+        "new_status",
+        "previous_resolution_notes",
+        "new_resolution_notes",
+        "changed_by",
+    )
+
+    def has_add_permission(self, request, obj=None):
+        return False
+
+
 @admin.register(Dispute)
 class DisputeAdmin(admin.ModelAdmin):
-    list_display = ("id", "agreement", "filed_by", "status", "created_at")
+    list_display = ("id", "agreement", "filed_by", "status", "created_at", "has_landlord_reply")
+    inlines = (DisputeAuditEntryInline,)
+
+    @admin.display(boolean=True, description="Landlord reply")
+    def has_landlord_reply(self, obj):
+        return bool(obj.landlord_response and str(obj.landlord_response).strip())
     list_filter = ("status",)
     search_fields = ("reason", "resolution_notes")
 
 
+@admin.register(DisputeAuditEntry)
+class DisputeAuditEntryAdmin(admin.ModelAdmin):
+    list_display = ("id", "dispute", "previous_status", "new_status", "changed_by", "created_at")
+    list_filter = ("previous_status", "new_status")
+    readonly_fields = (
+        "dispute",
+        "previous_status",
+        "new_status",
+        "previous_resolution_notes",
+        "new_resolution_notes",
+        "changed_by",
+        "created_at",
+    )
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+
 @admin.register(RentalReport)
 class RentalReportAdmin(admin.ModelAdmin):
-    list_display = ("id", "agreement", "report_type", "submitted_by", "reported_at")
-    list_filter = ("report_type",)
+    list_display = ("id", "agreement", "report_type", "status", "submitted_by", "reported_at")
+    list_filter = ("report_type", "status")
 
 
 @admin.register(CreditScore)

@@ -80,11 +80,11 @@ Full detail: **[`../README.md`](../README.md)** (API tables and domain model).
 
 ## Credit scoring
 
-Logic lives in **`rentals/scoring.py`**. Scores are recomputed when a landlord creates a **`RentalReport`**. To rebuild all tenant scores from existing data:
+- **Implementation:** `rentals/scoring.py` → `recalculate_tenant_credit_score(tenant_user_id)`.
+- **When it runs:** After each **`RentalReport`** create (`RentalReportViewSet.perform_create`).
+- **Bulk recompute:** `python manage.py recalculate_credit_scores`.
 
-```bash
-python manage.py recalculate_credit_scores
-```
+**Full specification** (penalties table, 0–100 clamp, `factors` JSON, consent vs reports order, MVP limits): **[`../README.md` — Rental credit score](../README.md#rental-credit-score)**.
 
 ---
 
